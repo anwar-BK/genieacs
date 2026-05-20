@@ -18,6 +18,10 @@ INSTALL GENIEACS DARKMODE Ubuntu OS 22.04
 ```
 bash darkmode.sh
 ```
+INSTALL GENIEACS STB
+```
+bash darkmode-arm.sh
+```
 INSTALL GENIEACS THEMA ORIGINAL v@1.2.13
 ```
 bash install.sh
