@@ -65,11 +65,6 @@ Kontribusi selalu diterima! Silakan buat pull request atau laporkan issue jika m
 
 https://wa.me/6281947215703
 
-atau link group telegram
-
-https://t.me/alijayaNetAcs
 
 SILAHKAN YANG INGIN BERBAGI UANG KOPI <br>
-0851-5533-2394
-
-![Image](https://github.com/user-attachments/assets/724e5ac2-626e-4f2d-bd1f-1265b70b544f)
+1730011827673 a/n taufik anwar MANDIRI
