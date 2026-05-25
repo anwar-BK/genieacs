@@ -70,6 +70,6 @@ atau link group telegram
 https://t.me/alijayaNetAcs
 
 SILAHKAN YANG INGIN BERBAGI UANG KOPI <br>
-https://paypal.me/warnetalijayaID
+0851-5533-2394
 
 ![Image](https://github.com/user-attachments/assets/724e5ac2-626e-4f2d-bd1f-1265b70b544f)
