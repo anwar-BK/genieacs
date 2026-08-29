@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# GenieACS Adaptive Auto Installer v4.0.0
-# Supports: Ubuntu 20/22/24, Debian 12, Armbian Ubuntu/Debian, amd64/arm64.
-# MongoDB version/backend is selected from OS + architecture + kernel, then
-# verified by a real mongod ping before GenieACS is started.
+# GenieACS Adaptive Auto Installer v4.1.0
+# Supports: Ubuntu 20.04 / 22.04 / 24.04, Debian 11/12, Armbian (Ubuntu/Debian) STB (amd64, arm64, armhf)
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="4.0.0"
+SCRIPT_VERSION="4.1.0"
 GENIEACS_VERSION="1.2.16"
 NODE_MAJOR="22"
 MONGO_DB="genieacs"
@@ -38,7 +36,7 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DB_DIR="${SCRIPT_DIR}/db"
 HOSTNAME_NOW="$(hostname 2>/dev/null || true)"
 LOCAL_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"; LOCAL_IP="${LOCAL_IP:-127.0.0.1}"
-OS_ID=""; OS_CODENAME=""; PRETTY_NAME=""; ARCH=""; INIT_SYSTEM=""; KERNEL_RELEASE="$(uname -r)"
+OS_ID=""; OS_LIKE=""; OS_CODENAME=""; PRETTY_NAME=""; ARCH=""; INIT_SYSTEM=""; KERNEL_RELEASE="$(uname -r)"
 IS_ARMBIAN=false
 KMAJOR=0; KMINOR=0; KPATCH=0
 GENIEACS_BIN_DIR=""
@@ -60,10 +58,16 @@ on_error(){
   local rc=$? line="${1:-unknown}"
   printf '\n%bINSTALLER GAGAL%b line=%s exit=%s\n' "$RED" "$NC" "$line" "$rc"
   systemctl --failed --no-pager 2>/dev/null || true
-  systemctl status mongod --no-pager -l 2>/dev/null || true
-  journalctl -u mongod --no-pager -n 80 2>/dev/null || true
-  systemctl status "$MONGO_UNIT" --no-pager -l 2>/dev/null || true
-  journalctl -u "$MONGO_UNIT" --no-pager -n 80 2>/dev/null || true
+  
+  if [[ "${MONGO_MODE:-}" == "native" ]]; then
+    systemctl status mongod --no-pager -l 2>/dev/null || true
+    journalctl -u mongod --no-pager -n 80 2>/dev/null || true
+  elif [[ "${MONGO_MODE:-}" == "docker" ]]; then
+    systemctl status "$MONGO_UNIT" --no-pager -l 2>/dev/null || true
+    journalctl -u "$MONGO_UNIT" --no-pager -n 80 2>/dev/null || true
+    docker logs --tail 80 "$MONGO_CONTAINER" 2>/dev/null || true
+  fi
+
   send_telegram "❌ GenieACS installer FAILED\nServer: ${HOSTNAME_NOW}\nIP: ${LOCAL_IP}\nOS: ${PRETTY_NAME}\nArch: ${ARCH}\nKernel: ${KERNEL_RELEASE}\nLine: ${line}\nExit: ${rc}"
   exit "$rc"
 }
@@ -76,14 +80,12 @@ Usage:
   sudo bash ${0##*/} [options]
 
 Options:
-  --yes, -y             Non-interactive.
-  --restore-db          Restore ${SCRIPT_DIR}/db (or db/genieacs) after install.
+  --yes, -y             Non-interactive mode.
+  --restore-db          Restore ${SCRIPT_DIR}/db after install.
   --skip-db             Do not install local MongoDB.
   --mongo-uri URI       Use external MongoDB; implies --skip-db.
   --no-telegram         Disable Telegram notifications.
   --help, -h            Show help.
-
-The installer chooses MongoDB automatically. It does NOT force MongoDB 8.
 USAGE
 }
 
@@ -100,13 +102,18 @@ while [[ $# -gt 0 ]]; do
   shift
 done
 
-[[ $(id -u) -eq 0 ]] || die "Jalankan sebagai root."
+[[ $(id -u) -eq 0 ]] || die "Jalankan skrip ini sebagai root."
 [[ -r /etc/os-release ]] || die "/etc/os-release tidak ditemukan."
 source /etc/os-release
-OS_ID="${ID:-unknown}"; OS_CODENAME="${VERSION_CODENAME:-} "; OS_CODENAME="${OS_CODENAME// /}"
+
+OS_ID="${ID:-unknown}"
+OS_LIKE="${ID_LIKE:-$OS_ID}"
+OS_CODENAME="${VERSION_CODENAME:-${UBUNTU_CODENAME:-}}"
+OS_CODENAME="${OS_CODENAME// /}"
 PRETTY_NAME="${PRETTY_NAME:-${OS_ID} ${VERSION_ID:-}}"
-ARCH="$(dpkg --print-architecture 2>/dev/null || true)"
+ARCH="$(dpkg --print-architecture 2>/dev/null || uname -m)"
 INIT_SYSTEM="$(ps -p 1 -o comm= 2>/dev/null || true)"
+
 [[ -f /etc/armbian-release ]] && IS_ARMBIAN=true
 [[ "$INIT_SYSTEM" == "systemd" ]] || die "systemd diperlukan; PID1=${INIT_SYSTEM}"
 
@@ -120,95 +127,86 @@ kernel_affected(){
 }
 
 printf '\n%b============================================================%b\n' "$GREEN" "$NC"
-printf '%b GenieACS Adaptive Auto Installer v%s%b\n' "$GREEN" "$SCRIPT_VERSION" "$NC"
-printf '%b GenieACS %s | Node.js %s LTS | MongoDB AUTO%b\n' "$GREEN" "$GENIEACS_VERSION" "$NODE_MAJOR" "$NC"
+printf '%b GenieACS Adaptive Auto Installer v%s (Universal & STB)%b\n' "$GREEN" "$SCRIPT_VERSION" "$NC"
+printf '%b GenieACS %s | Node.js %s LTS | Adaptive MongoDB%b\n' "$GREEN" "$GENIEACS_VERSION" "$NODE_MAJOR" "$NC"
 printf '%b============================================================%b\n\n' "$GREEN" "$NC"
 
-case "$ARCH" in amd64|arm64) ;; *) die "Architecture ${ARCH:-unknown} tidak didukung; gunakan amd64/arm64.";; esac
-case "$OS_ID:$OS_CODENAME" in
-  ubuntu:focal|ubuntu:jammy|ubuntu:noble|debian:bookworm) ;;
-  *) die "OS/codename tidak didukung: ${OS_ID}/${OS_CODENAME:-unknown}. Target: Ubuntu 20/22/24 atau Debian 12.";;
+case "$ARCH" in
+  amd64|arm64|aarch64) ;;
+  armhf|armv7l) warn "Arsitektur 32-bit ($ARCH) terdeteksi (biasanya STB lama). MongoDB 5.0+ tidak mendukung 32-bit native." ;;
+  *) die "Arsitektur ${ARCH} tidak didukung.";;
 esac
 
-log "Host=${HOSTNAME_NOW} | IP=${LOCAL_IP} | OS=${PRETTY_NAME} | code=${OS_CODENAME} | arch=${ARCH} | kernel=${KERNEL_RELEASE} | Armbian=${IS_ARMBIAN}"
-
-# CPU checks: MongoDB requires AVX on x86_64 and ARMv8.2-A on arm64.
-if [[ "$ARCH" == amd64 ]] && ! grep -qm1 -E '\bavx\b' /proc/cpuinfo 2>/dev/null; then
-  die "CPU x86_64 tidak menunjukkan AVX; MongoDB 5+ tidak didukung pada CPU ini."
-fi
-if [[ "$ARCH" == arm64 ]]; then
-  # We deliberately do not guess from one optional CPU flag. MongoDB itself is
-  # the authority: install/start is followed by a real ping. Warn only here.
-  warn "ARM64 terdeteksi. MongoDB membutuhkan ARMv8.2-A atau lebih baru; kemampuan CPU akan divalidasi lagi saat mongod start."
-fi
+log "Host=${HOSTNAME_NOW} | IP=${LOCAL_IP} | OS=${PRETTY_NAME} | Code=${OS_CODENAME} | Arch=${ARCH} | Kernel=${KERNEL_RELEASE} | Armbian STB=${IS_ARMBIAN}"
 
 MEM_MB="$(awk '/MemTotal:/ {printf "%d", $2/1024}' /proc/meminfo)"
 DISK_GB="$(df -Pk / | awk 'NR==2 {printf "%d", $4/1024/1024}')"
-(( DISK_GB >= 8 )) || die "Disk kosong hanya ${DISK_GB} GB; minimal 8 GB disarankan."
-(( MEM_MB >= 1024 )) || warn "RAM ${MEM_MB} MB; 1 GB+ disarankan."
+(( DISK_GB >= 4 )) || die "Disk kosong hanya ${DISK_GB} GB; minimal 4 GB diperlukan."
+(( MEM_MB >= 800 )) || warn "RAM ${MEM_MB} MB terdeteksi. Disarankan minimal 1 GB RAM untuk STB/Server."
 
 if [[ -n "$EXTERNAL_MONGO_URI" ]]; then SKIP_DB=true; MONGO_URI="$EXTERNAL_MONGO_URI"; fi
-[[ "$RESTORE_DB" == true && "$SKIP_DB" == true ]] && die "--restore-db tidak boleh bersama --skip-db/--mongo-uri."
+[[ "$RESTORE_DB" == true && "$SKIP_DB" == true ]] && die "--restore-db tidak boleh digabung dengan --skip-db/--mongo-uri."
 
 # -----------------------------------------------------------------------------
-# Adaptive MongoDB policy
-# -----------------------------------------------------------------------------
-# Ubuntu 20/22: MongoDB 7 is officially supported and is the fallback for the
-# affected 6.19..7.0.13 kernel range. Otherwise use MongoDB 8.
-# Ubuntu 24: MongoDB 8 is the supported major. On affected kernels we use the
-# official mongo:7.0-jammy container as a compatibility fallback (container
-# userspace is Jammy); startup is still tested before GenieACS continues.
-# Debian 12 amd64: MongoDB 8 native when kernel is safe; Docker 7 fallback on
-# affected kernels. Debian 12 arm64 uses official Docker image because the
-# Community platform matrix lists Debian 12 only for x86_64.
-# The official Docker image publishes MongoDB 7 for amd64 and arm64.
+# Adaptive MongoDB Selection Strategy (Termasuk Armbian STB)
 # -----------------------------------------------------------------------------
 select_mongodb(){
-  if [[ "$OS_ID" == ubuntu ]]; then
+  # Jika berjalan pada Armbian atau Arsitektur ARM (STB), Docker adalah pilihan yang jauh lebih aman
+  # untuk menghindari kegagalan instruksi CPU ARMv8.2-A pada MongoDB native 5.0+
+  if [[ "$IS_ARMBIAN" == true || "$ARCH" == "arm64" || "$ARCH" == "aarch64" ]]; then
+    MONGO_MAJOR="7.0"
+    MONGO_MODE="docker"
+    MONGO_IMAGE="mongo:7.0-jammy"
+  elif [[ "$ARCH" == "armhf" || "$ARCH" == "armv7l" ]]; then
+    MONGO_MAJOR="4.4"
+    MONGO_MODE="docker"
+    MONGO_IMAGE="mongo:4.4"
+  elif [[ "$OS_ID" == "ubuntu" ]]; then
     if kernel_affected; then
-      if [[ "$OS_CODENAME" == focal || "$OS_CODENAME" == jammy ]]; then
+      if [[ "$OS_CODENAME" == "focal" || "$OS_CODENAME" == "jammy" ]]; then
         MONGO_MAJOR="7.0"; MONGO_MODE="native"
       else
-        MONGO_MAJOR="7.0"; MONGO_MODE="docker"
+        MONGO_MAJOR="7.0"; MONGO_MODE="docker"; MONGO_IMAGE="mongo:7.0-jammy"
       fi
     else
       MONGO_MAJOR="8.0"; MONGO_MODE="native"
     fi
   else
-    if [[ "$ARCH" == amd64 && ! kernel_affected ]]; then
+    # Default Debian / Distro lainnya
+    if [[ "$ARCH" == "amd64" && ! kernel_affected ]]; then
       MONGO_MAJOR="8.0"; MONGO_MODE="native"
     else
-      MONGO_MAJOR="7.0"; MONGO_MODE="docker"
+      MONGO_MAJOR="7.0"; MONGO_MODE="docker"; MONGO_IMAGE="mongo:7.0-jammy"
     fi
   fi
-  MONGO_IMAGE="mongo:${MONGO_MAJOR}"
-  [[ "$MONGO_MODE" == docker && "$MONGO_MAJOR" == 7.0 ]] && MONGO_IMAGE="mongo:7.0-jammy"
+  [[ -z "${MONGO_IMAGE:-}" ]] && MONGO_IMAGE="mongo:${MONGO_MAJOR}"
 }
 
-if [[ "$SKIP_DB" == false ]]; then select_mongodb; else MONGO_MODE=external; fi
+if [[ "$SKIP_DB" == false ]]; then select_mongodb; else MONGO_MODE="external"; fi
 
 if [[ "$AUTO_YES" != true ]]; then
   cat <<EOF2
 
-Target:
-  OS            : ${PRETTY_NAME}
+Target Ringkasan Instalasi:
+  OS           : ${PRETTY_NAME} (Armbian STB: ${IS_ARMBIAN})
   Architecture : ${ARCH}
-  Kernel        : ${KERNEL_RELEASE}
-  RAM           : ${MEM_MB} MB
-  Disk          : ${DISK_GB} GB free
-  MongoDB       : $([[ "$SKIP_DB" == true ]] && echo external || echo "${MONGO_MAJOR} (${MONGO_MODE})")
-  GenieACS      : ${GENIEACS_VERSION}
-  Node.js       : ${NODE_MAJOR}.x
-  Restore DB    : ${RESTORE_DB}
+  Kernel       : ${KERNEL_RELEASE}
+  RAM          : ${MEM_MB} MB
+  Disk Free    : ${DISK_GB} GB
+  MongoDB Mode : $([[ "$SKIP_DB" == true ]] && echo "External" || echo "${MONGO_MAJOR} (${MONGO_MODE})")
+  GenieACS     : ${GENIEACS_VERSION}
+  Node.js      : ${NODE_MAJOR}.x
 
-Lanjutkan? (y/n)
+Lanjutkan proses instalasi? (y/n)
 EOF2
-  read -r ans; [[ "$ans" =~ ^[Yy]$ ]] || { ok "Dibatalkan."; exit 0; }
+  read -r ans; [[ "$ans" =~ ^[Yy]$ ]] || { ok "Instalasi dibatalkan oleh pengguna."; exit 0; }
 fi
 
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
 mkdir -p "$(dirname "$LOG_FILE")"
 exec > >(tee -a "$LOG_FILE") 2>&1
+
+log "Memperbarui direktori paket sistem..."
 apt-get update
 apt-get install -y --no-install-recommends ca-certificates curl gnupg openssl jq lsb-release logrotate procps iproute2 tar gzip xz-utils rsync build-essential python3
 
@@ -216,15 +214,16 @@ install_node(){
   local cur=""
   if command -v node >/dev/null 2>&1; then cur="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || true)"; fi
   if [[ "$cur" != "$NODE_MAJOR" ]]; then
+    log "Memasang Node.js ${NODE_MAJOR}.x..."
     curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" -o /tmp/nodesource.sh
     bash /tmp/nodesource.sh
     apt-get install -y nodejs
     rm -f /tmp/nodesource.sh
   fi
-  command -v node >/dev/null && command -v npm >/dev/null || die "Node/npm tidak tersedia."
+  command -v node >/dev/null && command -v npm >/dev/null || die "Node/npm gagal terpasang."
   cur="$(node -p 'process.versions.node.split(".")[0]')"
-  [[ "$cur" == "$NODE_MAJOR" ]] || die "Node.js ${cur} terpasang, diperlukan ${NODE_MAJOR}.x."
-  ok "Node $(node -v), npm $(npm -v)"
+  [[ "$cur" == "$NODE_MAJOR" ]] || die "Versi Node.js terdeteksi ${cur}, namun dibutuhkan versi ${NODE_MAJOR}.x."
+  ok "Node $(node -v) & npm $(npm -v) siap digunakan."
 }
 
 write_mongo_conf(){
@@ -249,10 +248,11 @@ MONGOCONF
 }
 
 mongo_ping(){
-  if [[ "$MONGO_MODE" == native ]]; then
+  if [[ "$MONGO_MODE" == "native" ]]; then
     mongosh --quiet --host 127.0.0.1 --port 27017 --eval 'db.adminCommand({ping:1}).ok' 2>/dev/null | grep -qx 1
-  elif [[ "$MONGO_MODE" == docker ]]; then
-    docker exec "$MONGO_CONTAINER" mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' 2>/dev/null | grep -qx 1
+  elif [[ "$MONGO_MODE" == "docker" ]]; then
+    docker exec "$MONGO_CONTAINER" mongosh --quiet --eval 'db.adminCommand({ping:1}).ok' 2>/dev/null | grep -qx 1 || \
+    docker exec "$MONGO_CONTAINER" mongo --quiet --eval 'db.adminCommand({ping:1}).ok' 2>/dev/null | grep -qx 1
   else
     mongosh --quiet "$MONGO_URI" --eval 'db.adminCommand({ping:1}).ok' 2>/dev/null | grep -qx 1
   fi
@@ -260,41 +260,25 @@ mongo_ping(){
 
 wait_mongo(){
   local n="${1:-90}"
-  for ((i=1;i<=n;i++)); do mongo_ping && { ok "MongoDB ping OK."; return 0; }; sleep 1; done
+  log "Menunggu ketersediaan koneksi MongoDB..."
+  for ((i=1;i<=n;i++)); do mongo_ping && { ok "MongoDB berhasil merespons (Ping OK)."; return 0; }; sleep 1; done
   return 1
 }
 
-prepare_native_mongo_version(){
-  local installed="" installed_major=""
-  if dpkg-query -W -f='${Version}\n' mongodb-org-server 2>/dev/null | grep -q .; then
-    installed="$(dpkg-query -W -f='${Version}' mongodb-org-server 2>/dev/null || true)"
-    installed_major="${installed%%.*}"
-    if [[ -n "$installed_major" && "$installed_major" != "${MONGO_MAJOR%%.*}" ]]; then
-      warn "MongoDB ${installed_major} terpasang tetapi policy memilih ${MONGO_MAJOR}."
-      systemctl stop mongod 2>/dev/null || true
-      if find /var/lib/mongodb -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .; then
-        die "Data MongoDB ditemukan di /var/lib/mongodb. Installer tidak akan melakukan downgrade major otomatis. Backup/migrasikan database terlebih dahulu."
-      fi
-      apt-get remove -y mongodb-org mongodb-org-database mongodb-org-server mongodb-mongos mongodb-org-mongos mongodb-org-shell mongodb-org-tools mongodb-database-tools mongodb-org-database-tools-extra mongodb-mongosh 2>/dev/null || true
-      apt-get autoremove -y 2>/dev/null || true
-    fi
-  fi
-}
-
 install_mongo_native(){
-  prepare_native_mongo_version
   local keyring="/usr/share/keyrings/mongodb-server-${MONGO_MAJOR}.gpg"
   install -d -m 0755 /usr/share/keyrings
   curl -fsSL "https://pgp.mongodb.com/server-${MONGO_MAJOR}.asc" | gpg --dearmor --yes -o "$keyring"
   chmod 0644 "$keyring"
   rm -f /etc/apt/sources.list.d/mongodb-org-*.list
-  if [[ "$OS_ID" == ubuntu ]]; then
-    printf 'deb [ arch=amd64,arm64 signed-by=%s ] https://repo.mongodb.org/apt/ubuntu %s/mongodb-org/%s multiverse\n' "$keyring" "$OS_CODENAME" "$MONGO_MAJOR" > "/etc/apt/sources.list.d/mongodb-org-${MONGO_MAJOR}.list"
-  else
-    printf 'deb [ arch=amd64 signed-by=%s ] https://repo.mongodb.org/apt/debian bookworm/mongodb-org/%s main\n' "$keyring" "$MONGO_MAJOR" > "/etc/apt/sources.list.d/mongodb-org-${MONGO_MAJOR}.list"
-  fi
+  
+  local target_codename="$OS_CODENAME"
+  [[ "$OS_ID" != "ubuntu" ]] && target_codename="bookworm"
+
+  printf 'deb [ arch=amd64,arm64 signed-by=%s ] https://repo.mongodb.org/apt/ubuntu %s/mongodb-org/%s multiverse\n' "$keyring" "$target_codename" "$MONGO_MAJOR" > "/etc/apt/sources.list.d/mongodb-org-${MONGO_MAJOR}.list"
+  
   apt-get update
-  apt-get install -y mongodb-org mongodb-mongosh mongodb-database-tools
+  apt-get install -y mongodb-org mongodb-mongosh mongodb-database-tools || apt-get install -y mongodb-org
   write_mongo_conf
   systemctl daemon-reload
   systemctl enable mongod
@@ -303,20 +287,21 @@ install_mongo_native(){
 }
 
 install_mongo_docker(){
+  log "Memasang Docker Engine untuk kontainer MongoDB..."
   apt-get install -y docker.io
   systemctl enable --now docker
   install -d -m 0755 "$MONGO_DATA_DIR"
   if docker container inspect "$MONGO_CONTAINER" >/dev/null 2>&1; then
     local image
     image="$(docker inspect -f '{{.Config.Image}}' "$MONGO_CONTAINER")"
-    [[ "$image" == "$MONGO_IMAGE" ]] || die "Container ${MONGO_CONTAINER} sudah memakai ${image}; tidak akan dihapus otomatis."
+    log "Container ${MONGO_CONTAINER} sudah ada dengan citra ${image}."
   else
     docker pull "$MONGO_IMAGE"
     docker create --name "$MONGO_CONTAINER" --restart=no -p 127.0.0.1:27017:27017 -v "${MONGO_DATA_DIR}:/data/db" "$MONGO_IMAGE" mongod --bind_ip_all --wiredTigerCacheSizeGB 0.25 >/dev/null
   fi
   cat > "/etc/systemd/system/${MONGO_UNIT}" <<EOF2
 [Unit]
-Description=GenieACS MongoDB container
+Description=GenieACS MongoDB Docker Container
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
@@ -339,35 +324,40 @@ EOF2
 }
 
 install_local_mongo(){
-  log "MongoDB selection: ${MONGO_MAJOR} / ${MONGO_MODE} / image=${MONGO_IMAGE:-native}"
-  if [[ "$MONGO_MODE" == native ]]; then
-    install_mongo_native || die "MongoDB ${MONGO_MAJOR} native gagal start."
+  log "Proses penyiapan MongoDB: Versi ${MONGO_MAJOR} | Mode: ${MONGO_MODE}"
+  if [[ "$MONGO_MODE" == "native" ]]; then
+    install_mongo_native || die "MongoDB Native gagal berjalan."
   else
-    install_mongo_docker || die "MongoDB ${MONGO_MAJOR} Docker gagal start."
+    install_mongo_docker || die "MongoDB Container (Docker) gagal berjalan."
   fi
 }
 
 install_node
 [[ "$SKIP_DB" == true ]] || install_local_mongo
 
-if [[ "$MONGO_MODE" == external ]]; then
+if [[ "$MONGO_MODE" == "external" ]]; then
   command -v mongosh >/dev/null 2>&1 || apt-get install -y mongodb-mongosh || true
   if command -v mongosh >/dev/null 2>&1; then
     mongosh --quiet "$MONGO_URI" --eval 'db.adminCommand({ping:1}).ok' 2>/dev/null | grep -qx 1 || die "External MongoDB ping gagal."
-  else
-    warn "mongosh tidak tersedia untuk ping external MongoDB; akan diverifikasi oleh GenieACS."
   fi
 fi
 
 install_genieacs(){
-  local installed=""
-  installed="$(npm list -g --depth=0 --json 2>/dev/null | jq -r '.dependencies.genieacs.version // empty' 2>/dev/null || true)"
-  if [[ "$installed" != "$GENIEACS_VERSION" ]]; then npm install -g --unsafe-perm "genieacs@${GENIEACS_VERSION}"; fi
-  for b in genieacs-cwmp genieacs-fs genieacs-nbi genieacs-ui; do command -v "$b" >/dev/null || die "$b tidak ditemukan."; done
-  GENIEACS_BIN_DIR="$(dirname "$(command -v genieacs-cwmp)")"
-  installed="$(npm list -g --depth=0 --json 2>/dev/null | jq -r '.dependencies.genieacs.version // empty' 2>/dev/null || true)"
-  [[ "$installed" == "$GENIEACS_VERSION" ]] || die "GenieACS version mismatch: ${installed:-unknown}"
-  ok "GenieACS ${installed} terpasang."
+  log "Menginstal GenieACS v${GENIEACS_VERSION} via NPM..."
+  npm install -g --unsafe-perm "genieacs@${GENIEACS_VERSION}"
+  hash -r 2>/dev/null || true
+
+  local bin_path
+  bin_path="$(command -v genieacs-cwmp 2>/dev/null || true)"
+  if [[ -z "$bin_path" ]]; then
+    local npm_prefix
+    npm_prefix="$(npm config get prefix)"
+    bin_path="${npm_prefix}/bin/genieacs-cwmp"
+  fi
+
+  [[ -x "$bin_path" ]] || die "Biner genieacs-cwmp tidak ditemukan."
+  GENIEACS_BIN_DIR="$(dirname "$bin_path")"
+  ok "GenieACS berhasil terpasang di ${GENIEACS_BIN_DIR}."
 }
 install_genieacs
 
@@ -378,7 +368,7 @@ JWT_SECRET=""
 [[ -f "$GENIEACS_ENV" ]] && JWT_SECRET="$(sed -n 's/^GENIEACS_UI_JWT_SECRET=//p' "$GENIEACS_ENV" | head -n1 || true)"
 [[ -n "$JWT_SECRET" && "$JWT_SECRET" != secret ]] || JWT_SECRET="$(openssl rand -hex 32)"
 
-if [[ "$MONGO_MODE" == external ]]; then :; elif [[ -f "$GENIEACS_ENV" ]]; then
+if [[ "$MONGO_MODE" != "external" && -f "$GENIEACS_ENV" ]]; then
   old="$(sed -n 's/^GENIEACS_MONGODB_CONNECTION_URL=//p' "$GENIEACS_ENV" | head -n1 || true)"
   [[ -n "$old" ]] && MONGO_URI="$old"
 fi
@@ -403,8 +393,8 @@ Description=${desc}
 After=network-online.target
 Wants=network-online.target
 EOF2
-  if [[ "$MONGO_MODE" == native ]]; then printf 'Requires=mongod.service\nAfter=mongod.service\n' >> "/etc/systemd/system/${svc}.service"; fi
-  if [[ "$MONGO_MODE" == docker ]]; then printf 'Requires=%s\nAfter=%s\n' "$MONGO_UNIT" "$MONGO_UNIT" >> "/etc/systemd/system/${svc}.service"; fi
+  if [[ "$MONGO_MODE" == "native" ]]; then printf 'Requires=mongod.service\nAfter=mongod.service\n' >> "/etc/systemd/system/${svc}.service"; fi
+  if [[ "$MONGO_MODE" == "docker" ]]; then printf 'Requires=%s\nAfter=%s\n' "$MONGO_UNIT" "$MONGO_UNIT" >> "/etc/systemd/system/${svc}.service"; fi
   cat >> "/etc/systemd/system/${svc}.service" <<EOF2
 
 [Service]
@@ -426,6 +416,7 @@ ReadWritePaths=${GENIEACS_HOME} ${GENIEACS_LOG_DIR}
 WantedBy=multi-user.target
 EOF2
 }
+
 write_service genieacs-cwmp 'GenieACS CWMP' genieacs-cwmp
 write_service genieacs-fs 'GenieACS File Server' genieacs-fs
 write_service genieacs-nbi 'GenieACS NBI' genieacs-nbi
@@ -452,20 +443,24 @@ wait_genieacs(){
     local active=false
     for _ in {1..60}; do systemctl is-active --quiet "$svc" && { active=true; break; }; sleep 1; done
     if [[ "$active" != true ]]; then systemctl status "$svc" --no-pager -l || true; journalctl -u "$svc" --no-pager -n 120 || true; die "$svc gagal aktif."; fi
-    ok "$svc RUNNING"
+    ok "Layanan $svc AKTIF"
   done
 }
+
 check_port(){
-  local p="$1"; ss -lnt 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${p}$" || die "Port ${p} tidak listening."; ok "Port ${p} LISTENING";
+  local p="$1"; ss -lnt 2>/dev/null | awk '{print $4}' | grep -Eq "(^|:)${p}$" || die "Port ${p} tidak listening."; ok "Port ${p} AKTIF (Listening)";
 }
+
 wait_genieacs
 check_port 3000; check_port 7547; check_port 7557; check_port 7567
-curl -fsS --max-time 10 http://127.0.0.1:3000/ >/dev/null || die "UI health check gagal."
+curl -fsS --max-time 10 http://127.0.0.1:3000/ >/dev/null || die "Health check UI gagal."
 
 backup_existing_db(){
   local stamp out
   stamp="$(date '+%Y%m%d-%H%M%S')"; out="${BACKUP_ROOT}/${stamp}"; install -d -m 0700 "$BACKUP_ROOT"
-  if [[ "$MONGO_MODE" == native ]]; then mongodump --db "$MONGO_DB" --out "$out"; else
+  if [[ "$MONGO_MODE" == "native" ]]; then 
+    mongodump --db "$MONGO_DB" --out "$out"
+  else
     docker exec "$MONGO_CONTAINER" mongodump --db "$MONGO_DB" --out "/tmp/backup-${stamp}" >/dev/null
     docker cp "$MONGO_CONTAINER:/tmp/backup-${stamp}" "$out" >/dev/null
     docker exec "$MONGO_CONTAINER" rm -rf "/tmp/backup-${stamp}" || true
@@ -476,44 +471,44 @@ backup_existing_db(){
 restore_db(){
   [[ -d "$DB_DIR" ]] || die "Folder DB tidak ditemukan: $DB_DIR"
   local dump="$DB_DIR"; [[ -d "$DB_DIR/$MONGO_DB" ]] && dump="$DB_DIR/$MONGO_DB"
-  find "$dump" -maxdepth 2 -type f \( -name '*.bson' -o -name '*.bson.gz' -o -name '*.metadata.json' \) -print -quit | grep -q . || die "${dump} bukan mongodump yang dikenali."
-  local backup; backup="$(backup_existing_db)"; ok "Backup: $backup"
+  find "$dump" -maxdepth 2 -type f \( -name '*.bson' -o -name '*.bson.gz' -o -name '*.metadata.json' \) -print -quit | grep -q . || die "${dump} bukan pustaka mongodump valid."
+  local backup; backup="$(backup_existing_db)"; ok "Backup saat ini dibuat di: $backup"
   for svc in genieacs-cwmp genieacs-fs genieacs-nbi genieacs-ui; do systemctl stop "$svc"; done
   local rc=0
-  if [[ "$MONGO_MODE" == native ]]; then
-    mongorestore --drop --db "$MONGO_DB" "$dump" || rc=$?
+  if [[ "$MONGO_MODE" == "native" ]]; then
+    mongorestore --drop --db "$MONGO_DB" --dir="$dump" || rc=$?
   else
     local tmp="/tmp/genieacs-restore-$$"; rm -rf "$tmp"; mkdir -p "$tmp"; rsync -a "$dump/" "$tmp/"
     docker exec "$MONGO_CONTAINER" rm -rf /tmp/genieacs-restore || true
     docker cp "$tmp/." "$MONGO_CONTAINER:/tmp/genieacs-restore/"
-    docker exec "$MONGO_CONTAINER" mongorestore --drop --db "$MONGO_DB" /tmp/genieacs-restore || rc=$?
+    docker exec "$MONGO_CONTAINER" mongorestore --drop --db "$MONGO_DB" --dir=/tmp/genieacs-restore || rc=$?
     docker exec "$MONGO_CONTAINER" rm -rf /tmp/genieacs-restore || true; rm -rf "$tmp"
   fi
   for svc in genieacs-cwmp genieacs-fs genieacs-nbi genieacs-ui; do systemctl start "$svc" || true; done
-  (( rc == 0 )) || die "Restore gagal exit=${rc}; backup tetap di ${backup}"
-  mongo_ping || die "MongoDB ping gagal setelah restore."; wait_genieacs; ok "Restore selesai; backup=${backup}"
+  (( rc == 0 )) || die "Restore DB gagal dengan exit status ${rc}."
+  mongo_ping || die "MongoDB ping gagal setelah proses restore."; wait_genieacs; ok "Restore DB selesai."
 }
 
 if [[ "$RESTORE_DB" == true ]]; then restore_db
 elif [[ "$AUTO_YES" != true && -d "$DB_DIR" && "$SKIP_DB" == false ]]; then
-  read -r -p "Folder db ditemukan. Restore sekarang? (y/n): " ans
-  [[ "$ans" =~ ^[Yy]$ ]] && restore_db || warn "Restore dilewati."
+  read -r -p "Folder backup db ditemukan. Lakukan restore sekarang? (y/n): " ans
+  [[ "$ans" =~ ^[Yy]$ ]] && restore_db || warn "Proses restore dilewati."
 fi
 
 wait_genieacs; check_port 3000; check_port 7547; check_port 7557; check_port 7567
-curl -fsS --max-time 10 http://127.0.0.1:3000/ >/dev/null || die "Final UI health check gagal."
+curl -fsS --max-time 10 http://127.0.0.1:3000/ >/dev/null || die "Final UI check gagal."
 
 printf '\n%b============================================================%b\n' "$GREEN" "$NC"
-printf '%b GENIEACS INSTALLATION SUCCESS%b\n' "$GREEN" "$NC"
+printf '%b GENIEACS INSTALASI SUKSES %b\n' "$GREEN" "$NC"
 printf '%b============================================================%b\n' "$GREEN" "$NC"
 printf 'OS           : %s\n' "$PRETTY_NAME"
 printf 'Architecture : %s\n' "$ARCH"
 printf 'Kernel       : %s\n' "$KERNEL_RELEASE"
-printf 'Node         : %s\n' "$(node -v)"
+printf 'Node.js      : %s\n' "$(node -v)"
 printf 'GenieACS     : %s\n' "$GENIEACS_VERSION"
 printf 'MongoDB      : %s (%s)\n' "${MONGO_MAJOR:-external}" "$MONGO_MODE"
-printf 'UI           : http://%s:3000\n' "$LOCAL_IP"
-printf 'CWMP         : 7547\nNBI          : 7557\nFS           : 7567\n'
-printf 'Environment  : %s\nInstaller log: %s\n' "$GENIEACS_ENV" "$LOG_FILE"
+printf 'Dashboard UI : http://%s:3000\n' "$LOCAL_IP"
+printf 'Port CWMP    : 7547\nPort NBI     : 7557\nPort FS      : 7567\n'
+printf 'Env Config   : %s\nLog File     : %s\n' "$GENIEACS_ENV" "$LOG_FILE"
 printf '%b============================================================%b\n' "$GREEN" "$NC"
-send_telegram "✅ GenieACS ${GENIEACS_VERSION} installed\nServer: ${HOSTNAME_NOW}\nOS: ${PRETTY_NAME}\nArch: ${ARCH}\nKernel: ${KERNEL_RELEASE}\nMongoDB: ${MONGO_MAJOR:-external} (${MONGO_MODE})\nNode: $(node -v)\nUI: http://${LOCAL_IP}:3000"
+send_telegram "✅ GenieACS ${GENIEACS_VERSION} Installed\nServer: ${HOSTNAME_NOW}\nOS: ${PRETTY_NAME}\nArch: ${ARCH}\nKernel: ${KERNEL_RELEASE}\nMongoDB: ${MONGO_MAJOR:-external} (${MONGO_MODE})\nNode: $(node -v)\nUI: http://${LOCAL_IP}:3000"
