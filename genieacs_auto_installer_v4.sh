@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# GenieACS Adaptive Auto Installer v4.2.1
-# Fix: Systemd permission & Port listening retry delay for GenieACS UI
+# GenieACS Adaptive Auto Installer v4.3.0
+# Feature: Native & Docker MongoDB Auto-Restore from db/ folder
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="4.2.1"
+SCRIPT_VERSION="4.3.0"
 GENIEACS_VERSION="1.2.16"
 NODE_MAJOR="22"
 MONGO_DB="genieacs"
@@ -40,7 +40,7 @@ Usage:
 
 Options:
   --yes, -y             Non-interactive mode.
-  --restore-db          Restore db/ directory after install.
+  --restore-db          Force restore db/ directory after install.
   --skip-db             Do not install local MongoDB.
   --mongo-uri URI       Use external MongoDB; implies --skip-db.
   --no-telegram         Disable Telegram notifications.
@@ -138,6 +138,7 @@ kernel_affected(){
 printf '\n%b============================================================%b\n' "$GREEN" "$NC"
 printf '%b GenieACS Adaptive Auto Installer v%s %b\n' "$GREEN" "$SCRIPT_VERSION" "$NC"
 printf '%b Dynamic Hardware & OS Adaptive MongoDB Engine %b\n' "$GREEN" "$NC"
+printf '%b by : ANWAR | wa 0851-5533-2394 %b\n' "$GREEN" "$NC"
 printf '%b============================================================%b\n\n' "$GREEN" "$NC"
 
 case "$ARCH" in
@@ -360,6 +361,44 @@ if [[ "$SKIP_DB" == false ]]; then
   install_local_mongo
 fi
 
+# New v4.3.0: Auto Restore Database dari folder db/
+restore_database_if_present(){
+  if [[ -d "$DB_DIR" || "$RESTORE_DB" == true ]]; then
+    log "Memeriksa backup basis data di ${DB_DIR}..."
+    if [[ ! -d "$DB_DIR" ]]; then
+      warn "Direktori ${DB_DIR} tidak ditemukan untuk di-restore."
+      return 0
+    fi
+
+    # Pastikan mongodb-database-tools terpasang untuk mongorestore
+    if ! command -v mongorestore >/dev/null 2>&1; then
+      apt-get install -y mongodb-database-tools >/dev/null 2>&1 || true
+    fi
+
+    log "Melakukan restore data dari ${DB_DIR} ke MongoDB (${MONGO_DB})..."
+
+    if [[ "$MONGO_MODE" == "native" ]]; then
+      if command -v mongorestore >/dev/null 2>&1; then
+        mongorestore --host 127.0.0.1 --port 27017 --db="$MONGO_DB" --drop "$DB_DIR" || mongorestore --host 127.0.0.1 --port 27017 --nsInclude="${MONGO_DB}.*" --drop "$DB_DIR" || warn "Mongorestore native mengalami catatan minor."
+      else
+        warn "Biner mongorestore tidak tersedia, melewatin restore otomatis."
+        return 0
+      fi
+    elif [[ "$MONGO_MODE" == "docker" ]]; then
+      docker cp "$DB_DIR" "${MONGO_CONTAINER}:/tmp/db_restore"
+      docker exec "$MONGO_CONTAINER" mongorestore --db="$MONGO_DB" --drop /tmp/db_restore || docker exec "$MONGO_CONTAINER" mongorestore --drop /tmp/db_restore || warn "Mongorestore docker mengalami catatan minor."
+      docker exec "$MONGO_CONTAINER" rm -rf /tmp/db_restore
+    else
+      if command -v mongorestore >/dev/null 2>&1; then
+        mongorestore --uri="$MONGO_URI" --drop "$DB_DIR" || warn "Mongorestore external URI mengalami catatan minor."
+      fi
+    fi
+    ok "Database restore selesai diuji."
+  fi
+}
+
+restore_database_if_present
+
 install_genieacs(){
   log "Menginstal GenieACS v${GENIEACS_VERSION} via NPM..."
   npm install -g --unsafe-perm "genieacs@${GENIEACS_VERSION}"
@@ -400,7 +439,6 @@ GENIEACS_UI_JWT_SECRET=${JWT_SECRET}
 EOF2
 chown "$GENIEACS_USER:$GENIEACS_USER" "$GENIEACS_ENV"; chmod 0600 "$GENIEACS_ENV"
 
-# Fix v4.2.1: Simplified Systemd Service Unit tanpa aturan sandbox yang terlalu ketat
 write_service(){
   local svc="$1" desc="$2" bin="$3"
   cat > "/etc/systemd/system/${svc}.service" <<EOF2
@@ -462,7 +500,6 @@ wait_genieacs(){
   done
 }
 
-# Fix v4.2.1: Menambahkan Retry Loop untuk Pengecekan Port
 check_port(){
   local p="$1"
   local found=false
@@ -485,7 +522,9 @@ wait_genieacs
 check_port 3000; check_port 7547; check_port 7557; check_port 7567
 
 printf '\n%b============================================================%b\n' "$GREEN" "$NC"
-printf '%b GENIEACS INSTALASI SUKSES %b\n' "$GREEN" "$NC"
+printf '%b GENIEACS INSTALASI & RESTORE SUKSES %b\n' "$GREEN" "$NC"
+printf '%b by: ANWAR | WA. 0851-5533-2394 %b\n' "$GREEN" "$NC"
+printf '%b BANTU SUBCRIBE Chanel Anwar-jr / @andharaanwar7902 %b\n' "$GREEN" "$NC"
 printf '%b============================================================%b\n' "$GREEN" "$NC"
 printf 'Dashboard UI : http://%s:3000\n' "$LOCAL_IP"
 printf 'Port CWMP    : 7547\nPort NBI     : 7557\nPort FS      : 7567\n'
