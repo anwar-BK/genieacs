@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # GenieACS Adaptive Auto Installer v4.3.0
 # Feature: Native & Docker MongoDB Auto-Restore from db/ folder
+# Telegram (optional):
+#   export TELEGRAM_BOT_TOKEN='8894755882:AAFmVNjmjoGx6-P799GEiiLruC8ZlEduRQk'
+#   export TELEGRAM_CHAT_ID='6047013356'
+#
 
 set -Eeuo pipefail
 IFS=$'\n\t'
