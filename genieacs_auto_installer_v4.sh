@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# GenieACS Adaptive Auto Installer v4.1.0
+# GenieACS Adaptive Auto Installer v4.1.1 (Fixed Line 185 Read Error)
 # Supports: Ubuntu 20.04 / 22.04 / 24.04, Debian 11/12, Armbian (Ubuntu/Debian) STB (amd64, arm64, armhf)
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="4.1.0"
+SCRIPT_VERSION="4.1.1"
 GENIEACS_VERSION="1.2.16"
 NODE_MAJOR="22"
 MONGO_DB="genieacs"
@@ -133,7 +133,7 @@ printf '%b============================================================%b\n\n' "$
 
 case "$ARCH" in
   amd64|arm64|aarch64) ;;
-  armhf|armv7l) warn "Arsitektur 32-bit ($ARCH) terdeteksi (biasanya STB lama). MongoDB 5.0+ tidak mendukung 32-bit native." ;;
+  armhf|armv7l) warn "Arsitektur 32-bit ($ARCH) terdeteksi. MongoDB 5.0+ tidak mendukung 32-bit native." ;;
   *) die "Arsitektur ${ARCH} tidak didukung.";;
 esac
 
@@ -147,12 +147,7 @@ DISK_GB="$(df -Pk / | awk 'NR==2 {printf "%d", $4/1024/1024}')"
 if [[ -n "$EXTERNAL_MONGO_URI" ]]; then SKIP_DB=true; MONGO_URI="$EXTERNAL_MONGO_URI"; fi
 [[ "$RESTORE_DB" == true && "$SKIP_DB" == true ]] && die "--restore-db tidak boleh digabung dengan --skip-db/--mongo-uri."
 
-# -----------------------------------------------------------------------------
-# Adaptive MongoDB Selection Strategy (Termasuk Armbian STB)
-# -----------------------------------------------------------------------------
 select_mongodb(){
-  # Jika berjalan pada Armbian atau Arsitektur ARM (STB), Docker adalah pilihan yang jauh lebih aman
-  # untuk menghindari kegagalan instruksi CPU ARMv8.2-A pada MongoDB native 5.0+
   if [[ "$IS_ARMBIAN" == true || "$ARCH" == "arm64" || "$ARCH" == "aarch64" ]]; then
     MONGO_MAJOR="7.0"
     MONGO_MODE="docker"
@@ -172,7 +167,6 @@ select_mongodb(){
       MONGO_MAJOR="8.0"; MONGO_MODE="native"
     fi
   else
-    # Default Debian / Distro lainnya
     if [[ "$ARCH" == "amd64" && ! kernel_affected ]]; then
       MONGO_MAJOR="8.0"; MONGO_MODE="native"
     else
@@ -184,6 +178,7 @@ select_mongodb(){
 
 if [[ "$SKIP_DB" == false ]]; then select_mongodb; else MONGO_MODE="external"; fi
 
+# PERBAIKAN: Penanganan safe read agar tidak crash saat set -e aktif
 if [[ "$AUTO_YES" != true ]]; then
   cat <<EOF2
 
@@ -199,7 +194,12 @@ Target Ringkasan Instalasi:
 
 Lanjutkan proses instalasi? (y/n)
 EOF2
-  read -r ans; [[ "$ans" =~ ^[Yy]$ ]] || { ok "Instalasi dibatalkan oleh pengguna."; exit 0; }
+  ans=""
+  read -r ans </dev/tty || read -r ans || true
+  if [[ ! "$ans" =~ ^[Yy]$ ]]; then
+    ok "Instalasi dibatalkan oleh pengguna."
+    exit 0
+  fi
 fi
 
 export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a
@@ -491,7 +491,8 @@ restore_db(){
 
 if [[ "$RESTORE_DB" == true ]]; then restore_db
 elif [[ "$AUTO_YES" != true && -d "$DB_DIR" && "$SKIP_DB" == false ]]; then
-  read -r -p "Folder backup db ditemukan. Lakukan restore sekarang? (y/n): " ans
+  ans=""
+  read -r -p "Folder backup db ditemukan. Lakukan restore sekarang? (y/n): " ans </dev/tty || read -r ans || true
   [[ "$ans" =~ ^[Yy]$ ]] && restore_db || warn "Proses restore dilewati."
 fi
 
