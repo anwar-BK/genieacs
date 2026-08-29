@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# GenieACS Adaptive Auto Installer v4.1.2
+# GenieACS Adaptive Auto Installer v4.1.3
 # Supports: Ubuntu 20.04 / 22.04 / 24.04, Debian 11/12, Armbian (Ubuntu/Debian) STB (amd64, arm64, armhf)
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="4.1.2"
+SCRIPT_VERSION="4.1.3"
 GENIEACS_VERSION="1.2.16"
 NODE_MAJOR="22"
 MONGO_DB="genieacs"
@@ -32,7 +32,6 @@ NO_TELEGRAM=false
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
 
-# Parse argumen CLI terlebih dahulu
 usage(){ cat <<USAGE
 GenieACS Adaptive Auto Installer v${SCRIPT_VERSION}
 
@@ -142,8 +141,15 @@ log "Host=${HOSTNAME_NOW} | IP=${LOCAL_IP} | OS=${PRETTY_NAME} | Code=${OS_CODEN
 
 MEM_MB="$(awk '/MemTotal:/ {printf "%d", $2/1024}' /proc/meminfo)"
 DISK_GB="$(df -Pk / | awk 'NR==2 {printf "%d", $4/1024/1024}')"
-(( DISK_GB >= 4 )) || die "Disk kosong hanya ${DISK_GB} GB; minimal 4 GB diperlukan."
-(( MEM_MB >= 800 )) || warn "RAM ${MEM_MB} MB terdeteksi. Disarankan minimal 1 GB RAM untuk STB/Server."
+
+# Pengecekan Disk & RAM Aman (Tanpa memicu set -e crash)
+if [ "$DISK_GB" -lt 4 ]; then
+  die "Disk kosong hanya ${DISK_GB} GB; minimal 4 GB diperlukan."
+fi
+
+if [ "$MEM_MB" -lt 800 ]; then
+  warn "RAM ${MEM_MB} MB terdeteksi. Disarankan minimal 1 GB RAM untuk STB/Server."
+fi
 
 if [[ -n "$EXTERNAL_MONGO_URI" ]]; then SKIP_DB=true; MONGO_URI="$EXTERNAL_MONGO_URI"; fi
 [[ "$RESTORE_DB" == true && "$SKIP_DB" == true ]] && die "--restore-db tidak boleh digabung dengan --skip-db/--mongo-uri."
@@ -179,7 +185,7 @@ select_mongodb(){
 
 if [[ "$SKIP_DB" == false ]]; then select_mongodb; else MONGO_MODE="external"; fi
 
-# Penanganan Prompt Interaktif yang Aman
+# Prompt Interaktif yang Aman
 if [[ "$AUTO_YES" != true ]]; then
   cat <<EOF2
 
@@ -201,7 +207,7 @@ EOF2
   elif [ -c /dev/tty ]; then
     read -r -p "Lanjutkan proses instalasi? (y/n): " ans </dev/tty 2>/dev/null || true
   else
-    ans="y" # Fallback jika berjalan di lingkungan non-tty
+    ans="y"
   fi
 
   if [[ -n "$ans" && ! "$ans" =~ ^[Yy]$ ]]; then
