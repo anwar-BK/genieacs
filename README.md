@@ -3,6 +3,12 @@ This is autoinstall GenieACS
 
 # Usage
 ```
+sudo su
+```
+```
+apt update
+```
+```
 apt install git curl -y
 ```
 ```
@@ -16,7 +22,7 @@ chmod +x *.sh
 ```
 INSTALL GENIEACS
 ```
-bash genieacs_auto_installer_v4.sh
+bash genieacs_auto_installer_v4.sh -y
 ```
 
 
