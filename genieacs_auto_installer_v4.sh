@@ -179,6 +179,7 @@ select_mongodb(){
 if [[ "$SKIP_DB" == false ]]; then select_mongodb; else MONGO_MODE="external"; fi
 
 # PERBAIKAN: Penanganan safe read agar tidak crash saat set -e aktif
+# KODE BARU YANG SUDAH DIPERBAIKI:
 if [[ "$AUTO_YES" != true ]]; then
   cat <<EOF2
 
@@ -192,11 +193,16 @@ Target Ringkasan Instalasi:
   GenieACS     : ${GENIEACS_VERSION}
   Node.js      : ${NODE_MAJOR}.x
 
-Lanjutkan proses instalasi? (y/n)
 EOF2
+  
   ans=""
-  read -r ans </dev/tty || read -r ans || true
-  if [[ ! "$ans" =~ ^[Yy]$ ]]; then
+  if [ -t 0 ]; then
+    read -r -p "Lanjutkan proses instalasi? (y/n): " ans || true
+  elif [ -c /dev/tty ]; then
+    read -r -p "Lanjutkan proses instalasi? (y/n): " ans </dev/tty 2>/dev/null || true
+  fi
+
+  if [[ -n "$ans" && ! "$ans" =~ ^[Yy]$ ]]; then
     ok "Instalasi dibatalkan oleh pengguna."
     exit 0
   fi
