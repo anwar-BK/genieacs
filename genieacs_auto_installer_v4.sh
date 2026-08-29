@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# GenieACS Adaptive Auto Installer v4.1.1 (Fixed Line 185 Read Error)
+# GenieACS Adaptive Auto Installer v4.1.2
 # Supports: Ubuntu 20.04 / 22.04 / 24.04, Debian 11/12, Armbian (Ubuntu/Debian) STB (amd64, arm64, armhf)
 
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-SCRIPT_VERSION="4.1.1"
+SCRIPT_VERSION="4.1.2"
 GENIEACS_VERSION="1.2.16"
 NODE_MAJOR="22"
 MONGO_DB="genieacs"
@@ -31,6 +31,36 @@ SKIP_DB=false
 NO_TELEGRAM=false
 
 GREEN='\033[0;32m'; RED='\033[0;31m'; YELLOW='\033[1;33m'; CYAN='\033[0;36m'; NC='\033[0m'
+
+# Parse argumen CLI terlebih dahulu
+usage(){ cat <<USAGE
+GenieACS Adaptive Auto Installer v${SCRIPT_VERSION}
+
+Usage:
+  sudo bash ${0##*/} [options]
+
+Options:
+  --yes, -y             Non-interactive mode.
+  --restore-db          Restore db/ directory after install.
+  --skip-db             Do not install local MongoDB.
+  --mongo-uri URI       Use external MongoDB; implies --skip-db.
+  --no-telegram         Disable Telegram notifications.
+  --help, -h            Show help.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --yes|-y) AUTO_YES=true;;
+    --restore-db) RESTORE_DB=true;;
+    --skip-db) SKIP_DB=true;;
+    --mongo-uri) [[ $# -ge 2 ]] || { echo "--mongo-uri membutuhkan URI"; exit 1; }; EXTERNAL_MONGO_URI="$2"; shift;;
+    --no-telegram) NO_TELEGRAM=true;;
+    --help|-h) usage; exit 0;;
+    *) echo "Opsi tidak dikenal: $1"; exit 1;;
+  esac
+  shift
+done
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 DB_DIR="${SCRIPT_DIR}/db"
@@ -72,35 +102,6 @@ on_error(){
   exit "$rc"
 }
 trap 'on_error $LINENO' ERR
-
-usage(){ cat <<USAGE
-GenieACS Adaptive Auto Installer v${SCRIPT_VERSION}
-
-Usage:
-  sudo bash ${0##*/} [options]
-
-Options:
-  --yes, -y             Non-interactive mode.
-  --restore-db          Restore ${SCRIPT_DIR}/db after install.
-  --skip-db             Do not install local MongoDB.
-  --mongo-uri URI       Use external MongoDB; implies --skip-db.
-  --no-telegram         Disable Telegram notifications.
-  --help, -h            Show help.
-USAGE
-}
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --yes|-y) AUTO_YES=true;;
-    --restore-db) RESTORE_DB=true;;
-    --skip-db) SKIP_DB=true;;
-    --mongo-uri) [[ $# -ge 2 ]] || die "--mongo-uri membutuhkan URI"; EXTERNAL_MONGO_URI="$2"; shift;;
-    --no-telegram) NO_TELEGRAM=true;;
-    --help|-h) usage; exit 0;;
-    *) die "Opsi tidak dikenal: $1";;
-  esac
-  shift
-done
 
 [[ $(id -u) -eq 0 ]] || die "Jalankan skrip ini sebagai root."
 [[ -r /etc/os-release ]] || die "/etc/os-release tidak ditemukan."
@@ -178,8 +179,7 @@ select_mongodb(){
 
 if [[ "$SKIP_DB" == false ]]; then select_mongodb; else MONGO_MODE="external"; fi
 
-# PERBAIKAN: Penanganan safe read agar tidak crash saat set -e aktif
-# KODE BARU YANG SUDAH DIPERBAIKI:
+# Penanganan Prompt Interaktif yang Aman
 if [[ "$AUTO_YES" != true ]]; then
   cat <<EOF2
 
@@ -194,12 +194,14 @@ Target Ringkasan Instalasi:
   Node.js      : ${NODE_MAJOR}.x
 
 EOF2
-  
+
   ans=""
   if [ -t 0 ]; then
     read -r -p "Lanjutkan proses instalasi? (y/n): " ans || true
   elif [ -c /dev/tty ]; then
     read -r -p "Lanjutkan proses instalasi? (y/n): " ans </dev/tty 2>/dev/null || true
+  else
+    ans="y" # Fallback jika berjalan di lingkungan non-tty
   fi
 
   if [[ -n "$ans" && ! "$ans" =~ ^[Yy]$ ]]; then
@@ -498,7 +500,11 @@ restore_db(){
 if [[ "$RESTORE_DB" == true ]]; then restore_db
 elif [[ "$AUTO_YES" != true && -d "$DB_DIR" && "$SKIP_DB" == false ]]; then
   ans=""
-  read -r -p "Folder backup db ditemukan. Lakukan restore sekarang? (y/n): " ans </dev/tty || read -r ans || true
+  if [ -t 0 ]; then
+    read -r -p "Folder backup db ditemukan. Lakukan restore sekarang? (y/n): " ans || true
+  elif [ -c /dev/tty ]; then
+    read -r -p "Folder backup db ditemukan. Lakukan restore sekarang? (y/n): " ans </dev/tty 2>/dev/null || true
+  fi
   [[ "$ans" =~ ^[Yy]$ ]] && restore_db || warn "Proses restore dilewati."
 fi
 
