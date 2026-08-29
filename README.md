@@ -14,18 +14,11 @@ cd genieacs
 ```
 chmod +x *.sh
 ```
-INSTALL GENIEACS DARKMODE Ubuntu OS 22.04
+INSTALL GENIEACS
 ```
-bash darkmode.sh
+bash genieacs_auto_installer_v4.sh
 ```
-INSTALL GENIEACS DARKMODE ARMBIAN (STB)
-```
-bash darkmode-arm.sh
-```
-INSTALL GENIEACS THEMA ORIGINAL v@1.2.13
-```
-bash install.sh
-```
+
 
 Baca terlebih dahulu !!!
 
